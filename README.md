@@ -24,8 +24,8 @@ test suite to pass.
 | 0 | Environment & structure | ✅ `config.py`, `requirements.txt`, package layout |
 | 1 | Data & features | ✅ synthetic generator, **IEEE-CIS adapter**, causal feature pipeline, sequence builder, time-based split, **EDA notebook** |
 | 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, training loop, eval/threshold tuning, **hyperparameter search** |
-| 3 | Explainability | 🧩 attention weights returned by model; SHAP wired in `lgbm_baseline.py` |
-| 4 | Deployment | 🧩 `serving/inference.py` SageMaker handlers + MLflow gate (code complete, not deployed) |
+| 3 | Explainability | ✅ attention weights + **`notebooks/03_attention_viz.ipynb`** (per-sequence audit trail); SHAP wired in `lgbm_baseline.py` |
+| 4 | Deployment | 🧩 `serving/inference.py` handlers + MLflow gate + **`package_model.py`** (builds deployable `model.tar.gz`); endpoint not deployed |
 | 5 | Monitoring & retrain | 🧩 PSI drift, Slack alerts, Airflow DAG (code complete, not scheduled) |
 
 ## Quickstart
@@ -98,7 +98,9 @@ training/train.py         training loop (MLflow-aware)
 training/evaluate.py      AUC, threshold tuning @ FPR≤5%
 training/hyperparameter_search.py   Optuna/random search over the plan's grid
 notebooks/01_eda.ipynb    EDA (imbalance, velocity, amount, mutual information)
+notebooks/03_attention_viz.ipynb   attention heatmaps — why a sequence was flagged
 serving/inference.py      SageMaker inference handlers
+serving/package_model.py  build a deployable model.tar.gz (artifacts + code/)
 monitoring/evidently_report.py   PSI + drift trigger
 monitoring/slack_alerts.py       webhook alerts
 pipelines/retrain_dag.py  Airflow retrain DAG
