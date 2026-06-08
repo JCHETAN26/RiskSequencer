@@ -1,5 +1,7 @@
 # RiskSequencer
 
+[![CI](https://github.com/JCHETAN26/RiskSequencer/actions/workflows/ci.yml/badge.svg)](https://github.com/JCHETAN26/RiskSequencer/actions/workflows/ci.yml)
+
 A 2-layer LSTM-with-attention behavioral anomaly detection system for transaction
 sequences. Detects fraud by reasoning over **sequences of user behavior over time**
 (device change → address update → burst of transactions) rather than scoring
