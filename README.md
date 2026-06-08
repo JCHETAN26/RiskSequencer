@@ -33,8 +33,13 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt        # torch, lightgbm, sklearn, mlflow, ...
 
-# 1. Generate synthetic transactions (no Kaggle needed)
+# 1a. Generate synthetic transactions (no Kaggle needed)
 python -m data.synthetic --n-users 2000
+
+# 1b. ...OR adapt the real IEEE-CIS dataset to the same schema
+#     (download via: kaggle competitions download -c ieee-fraud-detection,
+#      unzip train_transaction.csv / train_identity.csv into data/raw/)
+python -m data.ieee_cis            # writes data/raw/transactions.parquet
 
 # 2. Train the LSTM end-to-end and print validation metrics
 python -m training.train
@@ -82,6 +87,7 @@ raw transactions
 ```
 config.py                 single source of truth for constants/thresholds
 data/synthetic.py         synthetic transaction generator (fraud = behavioral burst)
+data/ieee_cis.py          IEEE-CIS Kaggle dataset -> canonical schema adapter
 data/sequence_builder.py  (N, 50, F) tensors + mask, time-based split, scaler
 features/feature_pipeline.py   modular causal feature functions
 models/lstm_model.py      RiskSequencer (LSTM + additive attention)

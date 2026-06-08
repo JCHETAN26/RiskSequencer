@@ -21,8 +21,11 @@ from config import FEATURE_COLUMNS
 # Reference point used to anchor the merchant-category ordinal encoding so
 # train/serve encodings match regardless of which categories appear.
 _MERCHANT_CATEGORIES = [
+    # synthetic generator vocabulary
     "grocery", "restaurant", "travel", "electronics",
     "fuel", "entertainment", "utilities", "online_retail",
+    # IEEE-CIS ProductCD codes (so the adapter encodes without "unknown")
+    "W", "C", "R", "H", "S",
 ]
 _MERCHANT_ENC = {c: i + 1 for i, c in enumerate(_MERCHANT_CATEGORIES)}  # 0 = unknown
 
