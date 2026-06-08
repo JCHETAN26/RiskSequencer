@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Data & artifacts (never commit data or model binaries)
+data/raw/*
+data/processed/*
+data/sequences/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/sequences/.gitkeep
+artifacts/
+mlruns/
+*.tar.gz
+*.pt
+*.pth
+*.pkl
+*.joblib
+
+# Secrets
+.env
+*.pem
+.aws/
+
+# OS
+.DS_Store
