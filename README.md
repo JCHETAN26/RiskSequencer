@@ -26,7 +26,7 @@ test suite to pass.
 | 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, training loop, eval/threshold tuning, **hyperparameter search** |
 | 3 | Explainability | ✅ attention viz + SHAP + **error analysis** (`notebooks/04`) + **business metrics** ($ caught / FP cost / net savings) |
 | 4 | Deployment | 🧩 `serving/inference.py` handlers + MLflow gate + **`package_model.py`** (builds deployable `model.tar.gz`); endpoint not deployed |
-| 5 | Monitoring & retrain | 🧩 PSI drift, Slack alerts, Airflow DAG (code complete, not scheduled) |
+| 5 | Monitoring & retrain | ✅ PSI drift, Slack alerts, **local end-to-end retrain orchestration + champion/challenger gate** (`pipelines/retrain.py`), Airflow DAG wrapper; live scheduling needs AWS |
 
 ## Quickstart
 
@@ -105,7 +105,8 @@ serving/inference.py      SageMaker inference handlers
 serving/package_model.py  build a deployable model.tar.gz (artifacts + code/)
 monitoring/evidently_report.py   PSI + drift trigger
 monitoring/slack_alerts.py       webhook alerts
-pipelines/retrain_dag.py  Airflow retrain DAG
+pipelines/retrain.py      local end-to-end retrain + promotion (gate + champion/challenger)
+pipelines/retrain_dag.py  Airflow retrain DAG (thin wrapper over pipelines/retrain.py)
 tests/                    pytest suite (features, sequences, model, endpoint, drift)
 ```
 
