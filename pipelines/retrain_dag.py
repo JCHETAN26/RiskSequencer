@@ -51,19 +51,28 @@ def evaluate_model(**context):
     raise NotImplementedError("evaluate candidate -> return test_auc_roc")
 
 
-def promote_model(run_id: str, auc_threshold: float = MLFLOW_AUC_GATE):
+def promote_model(
+    run_id: str,
+    auc_threshold: float = MLFLOW_AUC_GATE,
+    champion_auc: float | None = None,
+):
     """MLflow promotion gate — no manual override path.
 
-    Reads the run's test AUC and registers the model only if it clears the
-    gate; otherwise raises and the DAG fails loudly.
+    Reads the run's test AUC and registers the model only if `decide_promotion`
+    approves it (absolute gate + champion/challenger comparison); otherwise
+    raises so the DAG fails loudly. The decision logic is shared with the local
+    pipeline (`pipelines.retrain.decide_promotion`) so both agree.
     """
     import mlflow
 
+    from pipelines.retrain import decide_promotion
+
     run = mlflow.get_run(run_id)
     auc = float(run.data.metrics["test_auc_roc"])
-    if auc < auc_threshold:
+    decision = decide_promotion(auc, champion_auc, gate=auc_threshold)
+    if not decision.promote:
         alert_gate_failed(auc, auc_threshold)
-        raise ValueError(f"Model AUC {auc:.3f} below gate {auc_threshold}. Blocked.")
+        raise ValueError(decision.reason)
     mlflow.register_model(f"runs:/{run_id}/model", REGISTERED_MODEL_NAME)
     alert_retrain_complete(auc, auc_threshold)
     return auc
