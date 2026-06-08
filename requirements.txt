@@ -9,6 +9,11 @@ shap>=0.44
 # Experiment tracking & monitoring
 mlflow>=2.9
 evidently>=0.4
+optuna>=3.5        # hyperparameter search (random-search fallback if absent)
+
+# Notebooks
+nbformat>=5.9
+jupyter>=1.0
 
 # AWS / deployment
 boto3>=1.34

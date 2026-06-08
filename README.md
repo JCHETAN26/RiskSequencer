@@ -20,8 +20,8 @@ test suite to pass.
 | Phase | Area | State |
 |---|---|---|
 | 0 | Environment & structure | ✅ `config.py`, `requirements.txt`, package layout |
-| 1 | Data & features | ✅ synthetic generator, causal feature pipeline, sequence builder, time-based split |
-| 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, training loop, eval/threshold tuning |
+| 1 | Data & features | ✅ synthetic generator, **IEEE-CIS adapter**, causal feature pipeline, sequence builder, time-based split, **EDA notebook** |
+| 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, training loop, eval/threshold tuning, **hyperparameter search** |
 | 3 | Explainability | 🧩 attention weights returned by model; SHAP wired in `lgbm_baseline.py` |
 | 4 | Deployment | 🧩 `serving/inference.py` SageMaker handlers + MLflow gate (code complete, not deployed) |
 | 5 | Monitoring & retrain | 🧩 PSI drift, Slack alerts, Airflow DAG (code complete, not scheduled) |
@@ -94,6 +94,8 @@ models/lstm_model.py      RiskSequencer (LSTM + additive attention)
 models/lgbm_baseline.py   LightGBM baseline + SHAP
 training/train.py         training loop (MLflow-aware)
 training/evaluate.py      AUC, threshold tuning @ FPR≤5%
+training/hyperparameter_search.py   Optuna/random search over the plan's grid
+notebooks/01_eda.ipynb    EDA (imbalance, velocity, amount, mutual information)
 serving/inference.py      SageMaker inference handlers
 monitoring/evidently_report.py   PSI + drift trigger
 monitoring/slack_alerts.py       webhook alerts

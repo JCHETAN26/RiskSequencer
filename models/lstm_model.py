@@ -24,12 +24,15 @@ class RiskSequencer(nn.Module):
         dropout: float = 0.3,
     ) -> None:
         super().__init__()
+        # PyTorch applies inter-layer dropout only *between* LSTM layers, so it
+        # is a no-op (and warns) when num_layers == 1. Zero it in that case.
+        lstm_dropout = dropout if num_layers > 1 else 0.0
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout,
+            dropout=lstm_dropout,
             bidirectional=False,
         )
         self.attention = nn.Linear(hidden_size, 1)  # additive attention score
