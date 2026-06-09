@@ -114,6 +114,60 @@ def load_ieee_cis(
     return to_canonical(txn, identity, uid_cols=uid_cols)
 
 
+def native_feature_columns(all_columns: list[str]) -> list[str]:
+    """Select IEEE-CIS's native numeric signal columns for the LightGBM layer.
+
+    These are the engineered features where most of IEEE-CIS's predictive power
+    lives — the Vesta ``V*`` features, the ``C*`` counts, ``D*`` timedeltas, plus
+    a few raw numerics. LightGBM handles their NaNs natively, so no imputation.
+    """
+    keep = [c for c in all_columns if c.startswith(("C", "D", "V"))]
+    for c in ("TransactionAmt", "card1", "card2", "card3", "card5",
+              "addr1", "addr2", "dist1", "dist2"):
+        if c in all_columns:
+            keep.append(c)
+    # exclude the time/id/label columns even if they match a prefix
+    return [c for c in keep if c not in ("TransactionID", "TransactionDT")]
+
+
+def load_hybrid(
+    transaction_csv: str | Path,
+    identity_csv: str | Path | None = None,
+    nrows: int | None = None,
+    uid_cols: tuple[str, ...] = ("card1", "addr1"),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load both views in one pass, sharing user_id/timestamp/label for the hybrid.
+
+    Returns ``(canonical_df, native_df)``:
+      * ``canonical_df`` — the schema the behavioral feature pipeline + LSTM consume.
+      * ``native_df`` — ``[TransactionID, user_id, timestamp, is_fraud]`` plus the
+        native numeric feature columns for the LightGBM layer.
+
+    Both frames carry the same ``user_id`` (uid proxy) and ``timestamp`` so a
+    time-based split lines the two models up on identical rows.
+    """
+    all_cols = pd.read_csv(transaction_csv, nrows=0).columns.tolist()
+    native_cols = native_feature_columns(all_cols)
+    read_cols = sorted(set(_TXN_USECOLS) | set(native_cols))
+    txn = pd.read_csv(transaction_csv, usecols=read_cols, nrows=nrows)
+
+    identity = None
+    if identity_csv is not None and Path(identity_csv).exists():
+        identity = pd.read_csv(identity_csv, usecols=_ID_USECOLS)
+
+    canonical = to_canonical(txn, identity, uid_cols=uid_cols)
+
+    native = pd.DataFrame()
+    native["TransactionID"] = txn["TransactionID"].astype("int64")
+    native["user_id"] = _build_uid(txn, list(uid_cols))
+    native["timestamp"] = REFERENCE_DATE + pd.to_timedelta(txn["TransactionDT"], unit="s")
+    native["is_fraud"] = txn["isFraud"].astype(int)
+    for c in native_cols:
+        native[c] = txn[c]
+    native = native.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+    return canonical, native
+
+
 def main() -> None:
     import argparse
 
