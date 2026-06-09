@@ -103,10 +103,12 @@ data/sequence_builder.py  (N, 50, F) tensors + mask, time-based split, scaler
 features/feature_pipeline.py   modular causal feature functions
 models/lstm_model.py      RiskSequencer (LSTM + additive attention)
 models/lgbm_baseline.py   LightGBM baseline + SHAP
+models/hybrid.py          LightGBM+LSTM stacking ensemble core (meta-learner)
 training/train.py         training loop (MLflow-aware)
 training/evaluate.py      AUC, threshold tuning @ FPR≤5%
 training/business_metrics.py   $ fraud caught / FP cost / net savings + profit curve
 training/hyperparameter_search.py   Optuna/random search over the plan's grid
+training/train_hybrid.py  hybrid LightGBM+LSTM training/eval (real IEEE-CIS)
 notebooks/01_eda.ipynb    EDA (imbalance, velocity, amount, mutual information)
 notebooks/02_modeling.ipynb   LightGBM baseline vs LSTM comparison (+ SHAP, ROC/PR)
 notebooks/03_attention_viz.ipynb   attention heatmaps — why a sequence was flagged
