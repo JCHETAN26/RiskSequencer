@@ -55,6 +55,15 @@ only), builds `(N, 50, F)` sequences, and trains the LSTM with
 `BCEWithLogitsLoss(pos_weight=...)`, early stopping on validation AUC. On the
 synthetic data it reaches val AUC ≈ 0.99.
 
+> **macOS gotcha — torch + LightGBM in one process.** Both ship their own OpenMP
+> runtime and segfault when loaded together (e.g. `02_modeling.ipynb`, which
+> trains both). Guard it by setting these **before** importing either library:
+> `OMP_NUM_THREADS=1` and `KMP_DUPLICATE_LIB_OK=TRUE` (plus `torch.set_num_threads(1)`
+> and LightGBM `num_threads=1`). The notebook's first cell does this; the rest of
+> the codebase never imports both in one process. Locked in by
+> `tests/test_torch_lgbm_coexist.py` (runs in a subprocess so a crash can't fail
+> the whole suite).
+
 ## Architecture
 
 ```
@@ -99,6 +108,7 @@ training/evaluate.py      AUC, threshold tuning @ FPR≤5%
 training/business_metrics.py   $ fraud caught / FP cost / net savings + profit curve
 training/hyperparameter_search.py   Optuna/random search over the plan's grid
 notebooks/01_eda.ipynb    EDA (imbalance, velocity, amount, mutual information)
+notebooks/02_modeling.ipynb   LightGBM baseline vs LSTM comparison (+ SHAP, ROC/PR)
 notebooks/03_attention_viz.ipynb   attention heatmaps — why a sequence was flagged
 notebooks/04_error_analysis.ipynb  FN/FP analysis, business metrics, profit curve
 serving/inference.py      SageMaker inference handlers
