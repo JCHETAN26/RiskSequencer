@@ -53,20 +53,25 @@ def _split_native_by_time(native: pd.DataFrame, t_train, t_val):
     )
 
 
-def _train_lgbm_native(tr: pd.DataFrame, va: pd.DataFrame, feat_cols: list[str]):
-    dtrain = lgb.Dataset(tr[feat_cols], tr["is_fraud"])
+def _train_lgbm_native(
+    tr: pd.DataFrame, va: pd.DataFrame, feat_cols: list[str], cat_cols: list[str]
+):
+    cat = [c for c in cat_cols if c in feat_cols]
+    dtrain = lgb.Dataset(tr[feat_cols], tr["is_fraud"], categorical_feature=cat or "auto")
     dval = lgb.Dataset(va[feat_cols], va["is_fraud"], reference=dtrain)
     pos = float(tr["is_fraud"].sum())
     neg = float(len(tr) - pos)
     params = {
-        "objective": "binary", "metric": "auc", "learning_rate": 0.05,
-        "num_leaves": 128, "feature_fraction": 0.7, "bagging_fraction": 0.8,
-        "bagging_freq": 1, "scale_pos_weight": neg / max(pos, 1.0),
-        "num_threads": 1, "verbose": -1,
+        "objective": "binary", "metric": "auc", "learning_rate": 0.03,
+        "num_leaves": 256, "min_child_samples": 50,
+        "feature_fraction": 0.6, "bagging_fraction": 0.8, "bagging_freq": 1,
+        "lambda_l1": 0.1, "lambda_l2": 1.0,
+        "scale_pos_weight": neg / max(pos, 1.0),
+        "max_cat_to_onehot": 8, "num_threads": 1, "verbose": -1,
     }
     return lgb.train(
-        params, dtrain, num_boost_round=500, valid_sets=[dval],
-        callbacks=[lgb.early_stopping(40), lgb.log_evaluation(0)],
+        params, dtrain, num_boost_round=1500, valid_sets=[dval],
+        callbacks=[lgb.early_stopping(60), lgb.log_evaluation(0)],
     )
 
 
@@ -90,12 +95,14 @@ def run_hybrid(
     val_ds = build_sequences(va_f, scaler)
     test_ds = build_sequences(te_f, scaler)
 
-    feat_cols = [c for c in native.columns
-                 if c not in ("TransactionID", "user_id", "timestamp", "is_fraud")]
+    from data.ieee_cis import categorical_columns, feature_columns
+
+    feat_cols = feature_columns(native)
+    cat_cols = categorical_columns(native)
     tr_n, va_n, te_n = _split_native_by_time(native, t_train, t_val)
 
     # --- LightGBM layer ----------------------------------------------------
-    lgbm = _train_lgbm_native(tr_n, va_n, feat_cols)
+    lgbm = _train_lgbm_native(tr_n, va_n, feat_cols, cat_cols)
 
     def lgbm_user(split_native):
         scores = lgbm.predict(split_native[feat_cols])

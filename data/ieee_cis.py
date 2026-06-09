@@ -43,6 +43,9 @@ _TXN_USECOLS = [
 ]
 _ID_USECOLS = ["TransactionID", "DeviceInfo"]
 
+# Transaction-side categorical columns for the LightGBM layer (object dtype).
+_TXN_CAT_COLS = ["ProductCD", "card4", "card6", "P_emaildomain", "R_emaildomain"]
+
 
 def _build_uid(df: pd.DataFrame, uid_cols: list[str]) -> pd.Series:
     """Construct a stable string user-id proxy from the given columns."""
@@ -130,6 +133,20 @@ def native_feature_columns(all_columns: list[str]) -> list[str]:
     return [c for c in keep if c not in ("TransactionID", "TransactionDT")]
 
 
+_META_COLS = ("TransactionID", "user_id", "timestamp", "is_fraud")
+
+
+def feature_columns(native_df: pd.DataFrame) -> list[str]:
+    """Model-input columns of a native_df (everything but the id/time/label meta)."""
+    return [c for c in native_df.columns if c not in _META_COLS]
+
+
+def categorical_columns(native_df: pd.DataFrame) -> list[str]:
+    """Columns LightGBM should treat as categorical (pandas 'category' dtype)."""
+    return [c for c in feature_columns(native_df)
+            if str(native_df[c].dtype) == "category"]
+
+
 def load_hybrid(
     transaction_csv: str | Path,
     identity_csv: str | Path | None = None,
@@ -141,29 +158,59 @@ def load_hybrid(
     Returns ``(canonical_df, native_df)``:
       * ``canonical_df`` — the schema the behavioral feature pipeline + LSTM consume.
       * ``native_df`` — ``[TransactionID, user_id, timestamp, is_fraud]`` plus the
-        native numeric feature columns for the LightGBM layer.
+        LightGBM feature columns: native numerics (``C*/D*/V*`` + raw), the
+        transaction categoricals (``ProductCD``, ``card4/6``, email domains), and
+        the **identity table** (``id_01–id_38``, ``DeviceType``, ``DeviceInfo``).
+        Object-dtype columns are converted to ``category`` so LightGBM treats them
+        as categorical; numerics keep their NaNs (LightGBM handles them).
 
     Both frames carry the same ``user_id`` (uid proxy) and ``timestamp`` so a
     time-based split lines the two models up on identical rows.
     """
     all_cols = pd.read_csv(transaction_csv, nrows=0).columns.tolist()
     native_cols = native_feature_columns(all_cols)
-    read_cols = sorted(set(_TXN_USECOLS) | set(native_cols))
+    cat_cols = [c for c in _TXN_CAT_COLS if c in all_cols]
+    read_cols = sorted(set(_TXN_USECOLS) | set(native_cols) | set(cat_cols))
     txn = pd.read_csv(transaction_csv, usecols=read_cols, nrows=nrows)
 
+    # Full identity table (only ~41 cols) for the LightGBM layer; DeviceInfo also
+    # feeds the canonical view's device_id.
     identity = None
     if identity_csv is not None and Path(identity_csv).exists():
-        identity = pd.read_csv(identity_csv, usecols=_ID_USECOLS)
+        identity = pd.read_csv(identity_csv)
 
-    canonical = to_canonical(txn, identity, uid_cols=uid_cols)
+    canonical = to_canonical(
+        txn, identity[["TransactionID", "DeviceInfo"]] if identity is not None else None,
+        uid_cols=uid_cols,
+    )
 
-    native = pd.DataFrame()
-    native["TransactionID"] = txn["TransactionID"].astype("int64")
-    native["user_id"] = _build_uid(txn, list(uid_cols))
-    native["timestamp"] = REFERENCE_DATE + pd.to_timedelta(txn["TransactionDT"], unit="s")
-    native["is_fraud"] = txn["isFraud"].astype(int)
-    for c in native_cols:
-        native[c] = txn[c]
+    # Build in one shot (avoid fragmenting the frame with hundreds of inserts).
+    native_data = {
+        "TransactionID": txn["TransactionID"].astype("int64"),
+        "user_id": _build_uid(txn, list(uid_cols)),
+        "timestamp": REFERENCE_DATE + pd.to_timedelta(txn["TransactionDT"], unit="s"),
+        "is_fraud": txn["isFraud"].astype(int),
+    }
+    for c in native_cols + cat_cols:
+        native_data[c] = txn[c]
+    native = pd.DataFrame(native_data)
+
+    # Merge the identity feature columns (everything except the join key).
+    if identity is not None:
+        id_feats = [c for c in identity.columns if c != "TransactionID"]
+        identity = identity.copy()
+        identity["TransactionID"] = identity["TransactionID"].astype("int64")
+        native = native.merge(
+            identity[["TransactionID"] + id_feats], on="TransactionID", how="left"
+        )
+
+    # Non-numeric feature columns -> category dtype (consistent vocab across splits).
+    # NB: pandas 3.0 reads strings as the `str` dtype, not `object`, so detect by
+    # "not numeric" rather than `== object`.
+    for c in feature_columns(native):
+        if not pd.api.types.is_numeric_dtype(native[c]):
+            native[c] = native[c].astype("category")
+
     native = native.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
     return canonical, native
 
