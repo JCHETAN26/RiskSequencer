@@ -12,18 +12,35 @@ automated retraining loop with drift-triggered + weekly retraining.
 
 ## Status
 
-This repository contains the **runnable foundation** — Phases 0–2 are implemented
-and verified end-to-end on a built-in synthetic data generator, so the whole
-pipeline (features → sequences → model → eval) trains locally with **no AWS or
-Kaggle download required**. The deployment/monitoring code (Phases 3–5) is written
-to spec and import-guarded so it doesn't require AWS/Airflow to be installed for the
-test suite to pass.
+All of Phases 0–5 are implemented, tested, and **validated on the real IEEE-CIS
+dataset** (not just the built-in synthetic generator). The full local pipeline —
+features → sequences → models → ensemble → eval → packaging → retrain
+orchestration — runs end-to-end. The remaining work is the parts that genuinely
+need AWS: deploying the SageMaker endpoint and wiring the Phase 5 loop to live
+data. Deployment/monitoring code is import-guarded so AWS/Airflow aren't needed
+to run the test suite.
+
+### Results on real IEEE-CIS (held-out test, user-level AUC)
+
+| Model | AUC | Notes |
+|---|---|---|
+| LSTM + attention alone | 0.812 | behavioral sequences only |
+| LightGBM alone | 0.926 | native `C/D/V` + identity + categorical features |
+| **Hybrid (stacked)** | **0.929** | LightGBM + LSTM via a logistic meta-learner |
+
+The build plan's 0.94 target assumed a sequence-friendly dataset; IEEE-CIS is
+fundamentally per-transaction (the `card1+addr1` user proxy yields a median of 2
+txns/user), so most signal is tabular. The **hybrid architecture** (from the
+system-prompt diagram) captures it: LightGBM on rich native features + the LSTM's
+sequence signal, combined by a meta-learner. On the **synthetic** generator the
+LSTM alone reaches ≈0.99 (fraud is deliberately separable there). See
+`training/train_hybrid.py`.
 
 | Phase | Area | State |
 |---|---|---|
 | 0 | Environment & structure | ✅ `config.py`, `requirements.txt`, package layout |
 | 1 | Data & features | ✅ synthetic generator, **IEEE-CIS adapter**, causal feature pipeline, sequence builder, time-based split, **EDA notebook** |
-| 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, training loop, eval/threshold tuning, **hyperparameter search** |
+| 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, **hybrid stacking ensemble** (`train_hybrid.py`), HPO — validated on real IEEE-CIS (hybrid 0.929) |
 | 3 | Explainability | ✅ attention viz + SHAP + **error analysis** (`notebooks/04`) + **business metrics** ($ caught / FP cost / net savings) |
 | 4 | Deployment | 🧩 `serving/inference.py` handlers + MLflow gate + **`package_model.py`** (builds deployable `model.tar.gz`); endpoint not deployed |
 | 5 | Monitoring & retrain | ✅ PSI drift, Slack alerts, **local end-to-end retrain orchestration + champion/challenger gate** (`pipelines/retrain.py`), Airflow DAG wrapper; live scheduling needs AWS |
@@ -68,15 +85,19 @@ synthetic data it reaches val AUC ≈ 0.99.
 
 ```
 raw transactions
-  └─ features/feature_pipeline.py   causal velocity / time / amount / flags
-       └─ data/sequence_builder.py  group by user, last 50 txns, left-pad + mask
-            ├─ models/lgbm_baseline.py   LightGBM on last-txn features (+ SHAP)
-            └─ models/lstm_model.py      2-layer LSTM + additive attention
-                 └─ training/train.py    pos_weight BCE, ReduceLROnPlateau, early stop
-                      └─ training/evaluate.py   AUC, threshold @ FPR≤5%
-                           └─ serving/inference.py   SageMaker model/input/predict/output_fn
-                                └─ monitoring/   PSI drift + Slack alerts
-                                     └─ pipelines/retrain_dag.py   Airflow weekly + on-drift
+  ├─ features/feature_pipeline.py → data/sequence_builder.py   (behavioral, per-user)
+  │    └─ models/lstm_model.py     2-layer LSTM + additive attention ─┐
+  │                                                                    │
+  └─ native tabular features (C/D/V + identity + categorical) ─────────┤
+       └─ LightGBM (per-txn → user-max aggregation) ───────────────────┤
+                                                                        ▼
+                                       models/hybrid.py  stacking meta-learner
+                                       training/train_hybrid.py  (real IEEE-CIS)
+                                                 │
+                                training/evaluate.py   AUC, threshold @ FPR≤5%
+                                serving/{inference,package_model}.py   model.tar.gz
+                                monitoring/   PSI drift + Slack alerts
+                                pipelines/retrain.py + retrain_dag.py   gate + champion/challenger
 ```
 
 ## Design constraints (enforced in code)
