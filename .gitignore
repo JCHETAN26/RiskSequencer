@@ -33,3 +33,6 @@ mlruns/
 # OS
 .DS_Store
 .gstack/
+
+# Personal study/interview doc — keep local, not in repo
+reference.txt
