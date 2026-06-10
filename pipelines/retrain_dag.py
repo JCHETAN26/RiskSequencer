@@ -35,10 +35,20 @@ from monitoring.slack_alerts import (
 def _default_reference_current() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Reference window vs the recent window, over the monitored features.
 
-    Default: synthetic reference + a drifted current window so the DAG runs a
-    full cycle out of the box. PRODUCTION: load the saved reference dataset and
-    the last-24h inference logs from s3://risksequencer-logs/.
+    If DATABASE_URL is set, read the windows from the Postgres inference log
+    (the production source). Otherwise fall back to synthetic data (with injected
+    drift) so the DAG still runs a full cycle out of the box.
     """
+    import os
+
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        from storage.db import get_engine, reference_current_split
+
+        ref, cur = reference_current_split(get_engine(db_url))
+        if len(ref) and len(cur):
+            return ref, cur
+
     import numpy as np
 
     rng = np.random.default_rng(0)

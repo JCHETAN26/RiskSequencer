@@ -1,0 +1,25 @@
+# PostgreSQL store for transactions + inference logs (the drift-monitoring source).
+#
+#   docker compose -f storage/docker-compose.yaml up -d
+#   export DATABASE_URL=postgresql+psycopg2://risk:risk@localhost:5432/risksequencer
+#   python -m storage.seed_demo
+#
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: risk
+      POSTGRES_PASSWORD: risk
+      POSTGRES_DB: risksequencer
+    ports:
+      - "5440:5432"   # host 5440 (5432/5433 taken locally); inside the container it is still 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U risk -d risksequencer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
