@@ -42,7 +42,7 @@ LSTM alone reaches ≈0.99 (fraud is deliberately separable there). See
 | 1 | Data & features | ✅ synthetic generator, **IEEE-CIS adapter**, causal feature pipeline, sequence builder, time-based split, **EDA notebook** |
 | 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, **hybrid stacking ensemble** (`train_hybrid.py`), HPO — validated on real IEEE-CIS (hybrid 0.929) |
 | 3 | Explainability | ✅ attention viz + SHAP + **error analysis** (`notebooks/04`) + **business metrics** ($ caught / FP cost / net savings) |
-| 4 | Deployment | 🧩 `serving/inference.py` handlers + MLflow gate + **`package_model.py`** (builds deployable `model.tar.gz`); endpoint not deployed |
+| 4 | Deployment | ✅ handlers + MLflow gate + `package_model.py` + **`deploy_sagemaker.py`** — deployed a real SageMaker endpoint and **verified p99 inference 45 ms < 50 ms** (CloudWatch ModelLatency, ml.c5.large), then torn down |
 | 5 | Monitoring & retrain | ✅ **Evidently AI** drift (PSI stattest, threshold 0.20), Slack alerts, retrain orchestration + champion/challenger gate, **runnable Airflow DAG** (`@weekly`, drift-triggered) with Docker compose + runbook |
 
 ## Quickstart
@@ -136,6 +136,7 @@ notebooks/03_attention_viz.ipynb   attention heatmaps — why a sequence was fla
 notebooks/04_error_analysis.ipynb  FN/FP analysis, business metrics, profit curve
 serving/inference.py      SageMaker inference handlers
 serving/package_model.py  build a deployable model.tar.gz (artifacts + code/)
+serving/deploy_sagemaker.py   deploy real-time endpoint, benchmark p99, teardown
 monitoring/evidently_report.py   Evidently AI drift (PSI stattest) + fallback PSI
 pipelines/airflow/        Dockerized Airflow (compose + Dockerfile + runbook)
 monitoring/slack_alerts.py       webhook alerts
