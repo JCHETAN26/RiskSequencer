@@ -1,0 +1,9 @@
+# Runtime deps the retrain DAG needs inside the Airflow image.
+# (LightGBM is intentionally omitted — the scheduled retrain path trains the
+#  LSTM via run_local_retrain; the hybrid LightGBM layer is trained offline.)
+torch>=2.0
+scikit-learn>=1.3
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+evidently>=0.7

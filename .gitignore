@@ -32,3 +32,4 @@ mlruns/
 
 # OS
 .DS_Store
+.gstack/

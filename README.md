@@ -43,7 +43,7 @@ LSTM alone reaches ≈0.99 (fraud is deliberately separable there). See
 | 2 | Modeling | ✅ LSTM+attention, LightGBM baseline, **hybrid stacking ensemble** (`train_hybrid.py`), HPO — validated on real IEEE-CIS (hybrid 0.929) |
 | 3 | Explainability | ✅ attention viz + SHAP + **error analysis** (`notebooks/04`) + **business metrics** ($ caught / FP cost / net savings) |
 | 4 | Deployment | 🧩 `serving/inference.py` handlers + MLflow gate + **`package_model.py`** (builds deployable `model.tar.gz`); endpoint not deployed |
-| 5 | Monitoring & retrain | ✅ PSI drift, Slack alerts, **local end-to-end retrain orchestration + champion/challenger gate** (`pipelines/retrain.py`), Airflow DAG wrapper; live scheduling needs AWS |
+| 5 | Monitoring & retrain | ✅ **Evidently AI** drift (PSI stattest, threshold 0.20), Slack alerts, retrain orchestration + champion/challenger gate, **runnable Airflow DAG** (`@weekly`, drift-triggered) with Docker compose + runbook |
 
 ## Quickstart
 
@@ -136,7 +136,8 @@ notebooks/03_attention_viz.ipynb   attention heatmaps — why a sequence was fla
 notebooks/04_error_analysis.ipynb  FN/FP analysis, business metrics, profit curve
 serving/inference.py      SageMaker inference handlers
 serving/package_model.py  build a deployable model.tar.gz (artifacts + code/)
-monitoring/evidently_report.py   PSI + drift trigger
+monitoring/evidently_report.py   Evidently AI drift (PSI stattest) + fallback PSI
+pipelines/airflow/        Dockerized Airflow (compose + Dockerfile + runbook)
 monitoring/slack_alerts.py       webhook alerts
 pipelines/retrain.py      local end-to-end retrain + promotion (gate + champion/challenger)
 pipelines/retrain_dag.py  Airflow retrain DAG (thin wrapper over pipelines/retrain.py)
