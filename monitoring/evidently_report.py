@@ -1,10 +1,13 @@
 """Drift monitoring for RiskSequencer.
 
-Computes Population Stability Index (PSI) on the three mandated behavioral
-features and decides whether to trigger retraining (PSI > 0.20). PSI is
-implemented directly so the trigger logic is testable without Evidently
-installed; `evidently_report` adds the rich HTML report when the dep is
-available.
+Primary engine is **Evidently AI**: we run its DataDriftPreset with the **PSI**
+stattest and a 0.20 threshold over the three monitored behavioral features, and
+trigger retraining when any feature's PSI exceeds the threshold.
+
+A hand-rolled PSI implementation is kept as a dependency-free FALLBACK so the
+trigger logic stays testable (and CI runnable) in environments where Evidently
+isn't installed. `check_drift` uses Evidently when available and transparently
+falls back otherwise; both return the same `DriftResult`.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from config import MONITORED_FEATURES, PSI_THRESHOLD
 class DriftResult:
     psi_by_feature: dict[str, float]
     breached: list[str]
+    engine: str = "evidently"   # "evidently" or "fallback"
 
     @property
     def should_retrain(self) -> bool:
@@ -30,7 +34,7 @@ class DriftResult:
 def population_stability_index(
     reference: np.ndarray, current: np.ndarray, bins: int = 10
 ) -> float:
-    """PSI between a reference and current distribution.
+    """PSI between a reference and current distribution (dependency-free).
 
     Bins are fixed on the reference quantiles. A small epsilon avoids
     division-by-zero / log(0) when a bin is empty in one distribution.
@@ -53,42 +57,95 @@ def population_stability_index(
     return float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
 
 
+def evidently_psi(
+    reference_df: pd.DataFrame,
+    current_df: pd.DataFrame,
+    features: list[str],
+    threshold: float = PSI_THRESHOLD,
+) -> dict[str, float]:
+    """Per-feature PSI via Evidently AI's DataDriftPreset (PSI stattest).
+
+    Raises ImportError if Evidently isn't installed (callers fall back).
+    """
+    from evidently import DataDefinition, Dataset, Report
+    from evidently.presets import DataDriftPreset
+
+    dd = DataDefinition(numerical_columns=list(features))
+    report = Report([DataDriftPreset(method="psi", threshold=threshold)])
+    snapshot = report.run(
+        Dataset.from_pandas(reference_df[features], data_definition=dd),
+        Dataset.from_pandas(current_df[features], data_definition=dd),
+    )
+    psi_by_feature: dict[str, float] = {}
+    for metric in snapshot.dict()["metrics"]:
+        cfg = metric.get("config", {})
+        if cfg.get("type", "").endswith("ValueDrift") and cfg.get("column") in features:
+            psi_by_feature[cfg["column"]] = float(metric["value"])
+    return psi_by_feature
+
+
 def check_drift(
     reference_df: pd.DataFrame,
     current_df: pd.DataFrame,
     features: list[str] | None = None,
     threshold: float = PSI_THRESHOLD,
+    use_evidently: bool = True,
 ) -> DriftResult:
-    """Compute PSI per monitored feature and flag those above `threshold`."""
+    """Compute PSI per monitored feature and flag those above `threshold`.
+
+    Uses Evidently AI when available; falls back to the built-in PSI otherwise.
+    """
     features = features or MONITORED_FEATURES
-    psi_by_feature, breached = {}, []
-    for feat in features:
-        psi = population_stability_index(reference_df[feat].to_numpy(), current_df[feat].to_numpy())
-        psi_by_feature[feat] = psi
-        if psi > threshold:
-            breached.append(feat)
-    return DriftResult(psi_by_feature=psi_by_feature, breached=breached)
+    engine = "evidently"
+    psi_by_feature: dict[str, float] = {}
+
+    if use_evidently:
+        try:
+            psi_by_feature = evidently_psi(reference_df, current_df, features, threshold)
+        except ImportError:
+            engine = "fallback"
+
+    if not psi_by_feature:  # fallback path (no Evidently, or it returned nothing)
+        engine = "fallback"
+        psi_by_feature = {
+            feat: population_stability_index(
+                reference_df[feat].to_numpy(), current_df[feat].to_numpy()
+            )
+            for feat in features
+        }
+
+    breached = [f for f, psi in psi_by_feature.items() if psi > threshold]
+    return DriftResult(psi_by_feature=psi_by_feature, breached=breached, engine=engine)
 
 
-def evidently_report(reference_df: pd.DataFrame, current_df: pd.DataFrame, out_html: str | None = None):
-    """Build an Evidently DataDriftPreset report (requires `evidently`)."""
-    from evidently.metric_preset import DataDriftPreset
-    from evidently.report import Report
+def evidently_html_report(
+    reference_df: pd.DataFrame,
+    current_df: pd.DataFrame,
+    out_html: str,
+    features: list[str] | None = None,
+    threshold: float = PSI_THRESHOLD,
+):
+    """Save a full Evidently HTML drift report (for the monitoring dashboard)."""
+    from evidently import DataDefinition, Dataset, Report
+    from evidently.presets import DataDriftPreset
 
-    report = Report(metrics=[DataDriftPreset()])
-    report.run(reference_data=reference_df[MONITORED_FEATURES],
-               current_data=current_df[MONITORED_FEATURES])
-    if out_html:
-        report.save_html(out_html)
-    return report
+    features = features or MONITORED_FEATURES
+    dd = DataDefinition(numerical_columns=list(features))
+    report = Report([DataDriftPreset(method="psi", threshold=threshold)])
+    snapshot = report.run(
+        Dataset.from_pandas(reference_df[features], data_definition=dd),
+        Dataset.from_pandas(current_df[features], data_definition=dd),
+    )
+    snapshot.save_html(out_html)
+    return out_html
 
 
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
     ref = pd.DataFrame({f: rng.normal(0, 1, 5000) for f in MONITORED_FEATURES})
-    # shift one feature hard to simulate drift
     cur = pd.DataFrame({f: rng.normal(0, 1, 5000) for f in MONITORED_FEATURES})
-    cur[MONITORED_FEATURES[0]] = rng.normal(3, 1.5, 5000)
+    cur[MONITORED_FEATURES[0]] = rng.normal(3, 1.5, 5000)  # inject drift
     res = check_drift(ref, cur)
+    print(f"engine: {res.engine}")
     print("PSI:", {k: round(v, 3) for k, v in res.psi_by_feature.items()})
     print("breached:", res.breached, "-> retrain:", res.should_retrain)

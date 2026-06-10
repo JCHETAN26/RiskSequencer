@@ -8,7 +8,7 @@ shap>=0.44
 
 # Experiment tracking & monitoring
 mlflow>=2.9
-evidently>=0.4
+evidently>=0.7     # drift monitoring (PSI stattest); 0.7.x API
 optuna>=3.5        # hyperparameter search (random-search fallback if absent)
 
 # Notebooks

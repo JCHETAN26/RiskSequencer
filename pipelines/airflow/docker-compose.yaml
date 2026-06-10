@@ -1,0 +1,29 @@
+# Local Airflow for the RiskSequencer weekly retrain DAG.
+# Single-node `airflow standalone` (SQLite + LocalExecutor) — enough to run and
+# schedule the DAG. For production use the official multi-service compose with
+# Postgres + CeleryExecutor.
+#
+# Run from the repo root:
+#   docker compose -f pipelines/airflow/docker-compose.yaml up --build
+# Then open http://localhost:8080 (admin password printed in the logs).
+services:
+  airflow:
+    build:
+      context: ../..
+      dockerfile: pipelines/airflow/Dockerfile
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/pipelines
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
+      PYTHONPATH: /opt/project
+      # Optional: real Slack alerts on drift / promotion / failure.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ../..:/opt/project          # mount the whole repo so the DAG imports project modules
+      - airflow_db:/opt/airflow
+    ports:
+      - "8080:8080"
+
+volumes:
+  airflow_db:
