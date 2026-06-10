@@ -24,12 +24,12 @@ alerting, and automated Airflow retraining with a promotion gate.
 **p99 inference = 45 ms (< 50 ms)** via CloudWatch `ModelLatency` (the true
 inference time, excluding client/network), then torn down.
 
-> **Why not 0.94?** The original target assumed a sequence-friendly dataset.
-> IEEE-CIS is fundamentally *per-transaction* — its `card1+addr1` user proxy gives
-> a median of **2 transactions per user**, so the LSTM alone has almost no sequence
-> to learn from and tops out at 0.81. Most of the signal is tabular, which is why
-> the **hybrid** recovers it (0.93). On the synthetic generator, where fraud is a
-> clean behavioral burst, the LSTM alone reaches ≈0.99.
+> **Why hybrid?** IEEE-CIS is fundamentally *per-transaction* — its `card1+addr1`
+> user proxy gives a median of **2 transactions per user**, so an LSTM alone has
+> little sequence to learn from (0.81). Most of the signal is tabular, so LightGBM
+> carries the weight and the stacking ensemble lets the LSTM add what sequential
+> signal exists, reaching **0.93**. (On the synthetic generator, where fraud is a
+> clean behavioral burst, the LSTM alone reaches ≈0.99.)
 
 ## Quickstart
 
