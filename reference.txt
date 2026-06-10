@@ -1,378 +1,491 @@
 ================================================================================
-RiskSequencer — Project Reference & Interview Prep
+RiskSequencer - Project Reference & Interview Prep
 Behavioral fraud detection: LSTM + LightGBM hybrid, with a full MLOps loop
 ================================================================================
 
-This document explains the project end to end: what it is, why it matters, the
-decisions behind the modeling, the real problems we hit and how we solved them,
-the results, and a set of interview questions with answers.
+This document explains the project end to end: what it is, why it matters, a
+plain-English walkthrough of what happens when, the architecture, why we chose
+each model, notes on Evidently AI, the real problems we hit and fixed, the
+results, and interview questions with answers.
 
 --------------------------------------------------------------------------------
-1. WHAT THE PROJECT IS (THE ONE-PARAGRAPH VERSION)
+1. WHAT THE PROJECT IS (ONE PARAGRAPH)
 --------------------------------------------------------------------------------
-RiskSequencer is a production-style fraud-detection system that scores a user's
-RISK by looking at SEQUENCES OF BEHAVIOR OVER TIME, not just one transaction in
-isolation. The core idea: a single action (a device change, a new country, a
-large purchase) can look fine on its own, but a PATTERN of actions — device
-change -> address update -> burst of rapid transactions — is the signature of an
+RiskSequencer scores a user's fraud RISK by looking at SEQUENCES OF BEHAVIOR OVER
+TIME, not one transaction in isolation. A single action (a device change, a new
+country, a big purchase) can look fine alone, but a PATTERN of actions - device
+change -> address update -> burst of fast transactions - is the signature of an
 account takeover. We model that pattern with a 2-layer LSTM + attention, combine
-it with a LightGBM model on rich tabular features, and wrap the whole thing in an
-MLOps loop: experiment tracking (MLflow), a real-time serving path (SageMaker
-handlers), drift monitoring (PSI / Evidently), Slack alerting, and automated
-retraining (Airflow) with a champion/challenger promotion gate.
+it with a LightGBM model on rich tabular features, and wrap everything in an
+MLOps loop: experiment tracking (MLflow), a real-time serving endpoint (AWS
+SageMaker), drift monitoring (Evidently AI), Slack alerting, and automated
+retraining (Airflow) with a promotion gate.
 
 --------------------------------------------------------------------------------
 2. WHY IT MATTERS (THE BUSINESS FRAMING)
 --------------------------------------------------------------------------------
-Fraud detection is a cost-asymmetry problem. Two kinds of error cost money in
-opposite directions:
-  - False negative (missed fraud) -> you eat the fraud amount ($).
-  - False positive (blocking a legit customer) -> churn + manual-review cost.
+Fraud detection is a cost-asymmetry problem. Two errors cost money in opposite
+directions:
+  - False negative (missed fraud)        -> you lose the fraud amount.
+  - False positive (block a real user)   -> churn + manual-review cost.
 
-A model that "looks good" on accuracy is useless here because fraud is ~1-3% of
-transactions; predicting "never fraud" is 97-99% accurate and catches nothing.
-So the project is framed around the RIGHT metrics (AUC-ROC, precision at a fixed
-low false-positive rate) and around DOLLARS (we built a business-metrics module:
-$ fraud caught, $ false-positive cost, net savings, and a profit curve that finds
-the threshold maximizing net savings — which is usually NOT the same threshold as
-"FPR <= 5%").
+Accuracy is useless here: fraud is ~1-3% of transactions, so "never fraud" scores
+97-99% accuracy and catches nothing. So we use the RIGHT metrics (AUC-ROC,
+precision at a fixed low false-positive rate) and DOLLARS (a business-metrics
+module computes $ fraud caught, $ false-positive cost, net savings, and a profit
+curve that finds the threshold that maximizes net savings - usually NOT the same
+threshold as "5% FPR").
 
-Why "sequence" framing matters: modern account-takeover fraud is specifically
-designed to defeat per-transaction rules. Each step is individually plausible.
-The fraud only becomes visible in the ORDER and TIMING of events. That is exactly
-what a sequence model with attention is built to expose — and, as a bonus, the
-attention weights tell a fraud analyst WHICH past events drove the flag.
+Why sequences: modern account-takeover fraud is designed to beat per-transaction
+rules. Each step looks legitimate; the fraud only shows up in the ORDER and TIMING
+of events. That is exactly what a sequence model with attention exposes - and the
+attention weights tell an analyst WHICH past events caused the flag.
 
 --------------------------------------------------------------------------------
-3. THE PROBLEM WE ACTUALLY SOLVED
---------------------------------------------------------------------------------
-Concretely we built an end-to-end, tested, reproducible pipeline that:
-  - Turns raw transactions into causally-correct (no-leakage) features.
-  - Builds left-padded (N, 50, F) per-user sequence tensors with a padding mask.
-  - Trains an LSTM+attention model and a LightGBM model.
-  - Combines them with a stacking meta-learner into a hybrid.
-  - Evaluates honestly on a TIME-BASED held-out split (no future leakage).
-  - Packages a deployable model.tar.gz for SageMaker.
-  - Detects drift (PSI), alerts on Slack, and retrains automatically with a
-    promotion gate (absolute AUC gate + champion/challenger comparison).
-
-And critically: we VALIDATED IT ON REAL DATA (IEEE-CIS, ~590K transactions), not
-just a toy generator. That validation is where the most interesting engineering
-lessons came from (see section 6).
-
---------------------------------------------------------------------------------
-4. WHY EACH MODEL — LSTM, LIGHTGBM, AND THEN THE HYBRID
+3. EASY ENGLISH: WHAT HAPPENS WHEN  (say this to an interviewer)
 --------------------------------------------------------------------------------
 
-4.1 WHY AN LSTM (+ ATTENTION)
+THERE ARE THREE STORIES. Tell them as three simple flows.
+
+--- STORY A: "A transaction comes in - how do we score it?" (inference) ---------
+  1. A user makes a transaction.
+  2. We pull that user's recent transaction history (their last 50 events).
+  3. We turn that history into numbers (features): how fast are they spending,
+     is this a new device or country, is the amount unusual for them, etc.
+  4. Two models look at it:
+       - The LSTM reads the SEQUENCE of those 50 events in order and asks "does
+         this pattern look like an account takeover?"
+       - LightGBM looks at the rich per-transaction details and asks "does this
+         single transaction look fraudulent?"
+  5. A small combiner (the stacking model) merges the two opinions into one
+     fraud probability between 0 and 1.
+  6. If the probability is above our chosen threshold, we flag it as fraud.
+  7. We also return the attention weights - basically "we flagged this because
+     of these specific recent events" - so a human can audit the decision.
+  All of this runs on a SageMaker endpoint and the model itself answers in about
+  45 milliseconds.
+
+--- STORY B: "How do we keep the model from going stale?" (the MLOps loop) ------
+  Fraud patterns change over time, so a model that was great last month can rot.
+  Every week, Airflow (a scheduler) wakes up automatically and:
+  1. Evidently AI compares recent behavior to a reference period and asks "have
+     the important features drifted?" using a number called PSI.
+  2. If PSI goes above 0.20 on any of our 3 watched features, that means behavior
+     has shifted enough to matter -> trigger a retrain. (If nothing drifted, it
+     stops and does nothing - no wasted compute.)
+  3. We retrain the model on fresh data.
+  4. We check the new model: it must beat a minimum quality bar (AUC >= 0.90) AND
+     beat the current production model (champion vs challenger). No human approval
+     needed; the gate is automatic and has no manual override.
+  5. If it passes, we package it and it can go live. If it fails, we keep the old
+     model.
+  6. Slack gets a message at each important step (drift found, retrain done,
+     gate passed/failed). Nobody has to babysit it.
+
+--- STORY C: "How is it deployed?" (serving) ------------------------------------
+  We bundle the trained model + its scaler + its decision threshold + the
+  inference code into one file (model.tar.gz), upload it to S3, and SageMaker
+  serves it as a real-time HTTP endpoint. We load-tested it and the model's own
+  inference time (p99) was 45 ms, under our 50 ms target.
+
+ONE-LINER YOU CAN SAY: "It's a fraud model that reads a user's recent behavior as
+a sequence, combines a deep sequence model with a gradient-boosted model, serves
+predictions in ~45ms on SageMaker, and retrains itself automatically when
+Evidently detects the data has drifted."
+
+--------------------------------------------------------------------------------
+4. ARCHITECTURE DIAGRAM
+--------------------------------------------------------------------------------
+
+  INFERENCE PATH (scoring a user)
+  ===============================
+
+     raw transactions
+            |
+            v
+     +------------------------+
+     | feature engineering    |   velocity, time gaps, amount z-score,
+     | (causal, no leakage)   |   new-device / new-country / new-merchant flags
+     +-----------+------------+
+                 |
+        +--------+---------+----------------------------+
+        |                  |                            |
+        v                  v                            v
+  +-----------+    +----------------+          (rich tabular features)
+  | sequence  |    | last-txn / raw |                  |
+  | builder   |    | tabular feats  |                  |
+  | (N,50,F)  |    +-------+--------+                   |
+  +-----+-----+            |                            |
+        v                  v                            |
+  +-----------+      +-----------+                      |
+  | 2-layer   |      | LightGBM  |<---------------------+
+  | LSTM +    |      |           |
+  | attention |      +-----+-----+
+  +-----+-----+            |
+        | LSTM score       | LightGBM score (max over user's txns)
+        +--------+---------+
+                 v
+        +------------------+
+        | stacking         |  logistic-regression meta-learner
+        | meta-learner     |  (trained on validation, not train)
+        +--------+---------+
+                 v
+        fraud probability  ->  threshold  ->  FLAG + attention explanation
+                 |
+                 v
+        +------------------------------+
+        | SageMaker real-time endpoint |   p99 inference ~45ms (< 50ms target)
+        +------------------------------+
+
+
+  MLOps LOOP (keeping the model fresh)
+  ====================================
+
+     Airflow (@weekly)                Evidently AI
+          |                          (DataDrift, PSI)
+          v                                |
+     +-----------+   PSI > 0.20 on any     |
+     | check_drift|--- 3 watched features--+--no--> stop (no retrain)
+     +-----+------+                        |
+           | yes (drift)
+           v
+     +-----------+     +------------------+     +------------------+
+     | retrain   |---->| promotion gate   |---->| package & deploy |
+     | (fresh    |     | AUC >= 0.90 AND  | yes | (challenger ->   |
+     |  data)    |     | beats champion   |     |  production)     |
+     +-----------+     +--------+---------+     +------------------+
+           |                    | no                     |
+           |                    v                        |
+           |              keep old model                 |
+           +------------- Slack alerts at each step ------+
+                          (MLflow logs every run)
+
+
+--------------------------------------------------------------------------------
+5. WHY EACH MODEL - LSTM, LIGHTGBM, AND THE HYBRID
+--------------------------------------------------------------------------------
+
+5.1 WHY AN LSTM (+ ATTENTION)
   - The hypothesis is sequential: fraud is a pattern across a user's recent
-    transactions. An LSTM processes a variable-length, ordered sequence and
-    carries state, so it can learn "device change THEN burst" relationships that
-    a model seeing one row cannot.
-  - Attention is MANDATORY in this project (explainability is a hard
-    requirement). Additive attention produces a weight per timestep; the weighted
-    sum is the context vector fed to the classifier. Those weights are the
-    explanation: "this sequence was flagged because of these specific past
-    events." We return (logits, attention_weights) from forward().
-  - We use a padding MASK so the attention never attends to the zero-padded
-    positions of short histories.
+    transactions. An LSTM processes an ordered, variable-length sequence and
+    carries state, so it can learn "device change THEN burst" relationships a
+    one-row model cannot.
+  - Attention is mandatory (explainability is a hard requirement). It gives a
+    weight per timestep; the weighted sum feeds the classifier, and the weights
+    are the explanation - "flagged because of these past events."
+  - We mask padding so attention ignores the zero-padded positions of short
+    histories.
 
-4.2 WHY A LIGHTGBM BASELINE
-  - Gradient-boosted trees are the workhorse for TABULAR fraud data. They handle
-    mixed numeric/categorical features, missing values natively, and heavy class
-    imbalance (scale_pos_weight), and they train fast and strong.
-  - It is a fair, hard-to-beat BASELINE: if a fancy sequence model can't beat a
-    boosted tree, the sequence framing isn't earning its complexity. The plan
-    explicitly wanted the LSTM to beat LightGBM by >= 4 AUC points to justify
-    itself.
-  - LightGBM also gives SHAP explanations for free (per-feature attributions).
+5.2 WHY A LIGHTGBM BASELINE / LAYER
+  - Gradient-boosted trees are the workhorse for TABULAR fraud data: mixed
+    numeric/categorical features, native missing-value handling, strong with
+    class imbalance (scale_pos_weight), fast and accurate.
+  - A fair, hard-to-beat baseline: if a sequence model can't beat a boosted tree,
+    the complexity isn't justified.
+  - Free SHAP explanations (per-feature attributions).
 
-4.3 WHY THE HYBRID (AND WHY STACKING)
-  - When we validated on REAL IEEE-CIS data, the LSTM alone hit only ~0.81 AUC,
-    far below the 0.94 target. Diagnosis (we proved it): NOT a model problem — a
-    FEATURE problem. Our behavioral feature pipeline used ~9 of the 394 columns,
-    discarding the C/D/V engineered features where IEEE-CIS's signal actually
-    lives. A throwaway LightGBM on the native features beat the LSTM by 7+ points.
-  - Also a STRUCTURAL mismatch: IEEE-CIS is fundamentally per-transaction. With a
-    card1+addr1 user proxy, the median user has only 2 transactions, so the
-    sequence model has almost nothing to "sequence."
-  - The fix is the architecture from the system prompt: a HYBRID. LightGBM
-    captures the rich tabular signal; the LSTM captures the (smaller) sequential
-    signal; a STACKING META-LEARNER (logistic regression) learns how to weight
-    the two. We aggregate LightGBM's per-transaction scores to the user level
-    with MAX ("fraud anywhere in the window"), align them to the LSTM's per-user
-    scores, fit the meta-learner ON THE VALIDATION SPLIT (so it never sees data
-    the base models trained on — this is what makes it proper stacking and not
-    leakage), and evaluate on the held-out test split.
-  - Result: hybrid reached 0.929, with the LSTM contributing a real (if small)
-    lift on top of LightGBM.
+5.3 WHY THE HYBRID (AND WHY STACKING)
+  - On REAL IEEE-CIS data the LSTM alone reached only ~0.81 AUC. We proved this
+    was a FEATURE problem, not a model problem: our pipeline used ~9 of 394
+    columns and dropped the C/D/V engineered features that carry the signal. A
+    quick LightGBM on the native features beat the LSTM by 7+ points.
+  - Also a STRUCTURAL mismatch: IEEE-CIS is per-transaction; the card1+addr1 user
+    proxy gives a median of 2 transactions per user, so the LSTM has almost no
+    sequence to learn from.
+  - Fix = the hybrid from the system-prompt design. LightGBM captures the rich
+    tabular signal; the LSTM captures the (smaller) sequence signal; a STACKING
+    META-LEARNER (logistic regression) learns how to weight them. We aggregate
+    LightGBM's per-transaction scores to the user level with MAX ("fraud anywhere
+    in the window"), align with the LSTM's per-user scores, fit the meta-learner
+    ON THE VALIDATION split (not train - that's what makes it leak-free stacking),
+    and evaluate on the held-out test split.
+  - Result: hybrid 0.929, with the LSTM adding real lift on top of LightGBM.
 
 --------------------------------------------------------------------------------
-5. THE BUILD, PHASE BY PHASE
+6. NOTES ON EVIDENTLY AI (the drift-monitoring piece)
+--------------------------------------------------------------------------------
+
+WHAT IT IS
+  Evidently AI is an open-source library for monitoring ML data and models in
+  production. Its core idea: compare a REFERENCE dataset (what the model was
+  trained on / a healthy baseline) against a CURRENT dataset (recent live data)
+  and report whether things have DRIFTED.
+
+WHAT "DRIFT" MEANS
+  Data drift = the input distribution today no longer looks like the data the
+  model learned from. Example: if "transactions per hour" suddenly spikes across
+  many users, the model is now seeing inputs it wasn't trained for, and its
+  predictions get less reliable. Drift is an EARLY WARNING that the model may be
+  going stale - you act before accuracy visibly drops.
+
+HOW WE USE IT (concretely)
+  - We run Evidently's DataDriftPreset with the PSI statistical test.
+  - PSI (Population Stability Index) is a single number for how much one feature's
+    distribution shifted. Rule of thumb: < 0.1 = stable, 0.1-0.2 = moderate,
+    > 0.2 = significant drift. We use a 0.20 threshold.
+  - We monitor exactly 3 behavioral features: txn_velocity_1h, amount_zscore,
+    new_device_flag. (Focused set = clean signal, low alert noise.)
+  - If ANY of the 3 crosses PSI 0.20, we trigger retraining and a Slack alert.
+  - Evidently can also produce a rich HTML drift report for a dashboard.
+
+WHY EVIDENTLY INSTEAD OF JUST COMPUTING PSI OURSELVES
+  We actually do both: Evidently is the primary engine (industry-standard,
+  produces shareable reports, supports many drift tests), and we keep a small
+  hand-rolled PSI as a dependency-free FALLBACK so the trigger logic stays
+  testable in environments where Evidently isn't installed (e.g. CI).
+
+HOW PSI IS COMPUTED (so you can explain it)
+  Bucket the reference values into bins. For each bin compute the % of reference
+  points and the % of current points. PSI = sum over bins of
+  (cur% - ref%) * ln(cur% / ref%). Bigger = more shift. It's symmetric-ish and
+  punishes bins that grew or shrank a lot.
+
+--------------------------------------------------------------------------------
+7. THE BUILD, PHASE BY PHASE
 --------------------------------------------------------------------------------
 Phase 0 - Environment & structure: config.py as the single source of truth for
-  the hard constants (sequence length = 50, PSI threshold = 0.20, MLflow AUC gate
-  = 0.90, the three monitored drift features), repo layout, requirements, CI.
+  the hard constants (sequence length = 50, PSI = 0.20, MLflow AUC gate = 0.90,
+  the 3 monitored features), repo layout, CI (GitHub Actions runs the tests on
+  every PR), branch protection.
 
-Phase 1 - Data & features:
-  - A SYNTHETIC generator that injects fraud as a behavioral burst, so the whole
-    pipeline runs with zero external dependencies.
-  - An IEEE-CIS ADAPTER mapping the Kaggle dataset to one canonical schema, so all
-    downstream code is dataset-agnostic. It reconstructs the two things IEEE-CIS
-    lacks: a timestamp (TransactionDT anchored to a reference date) and a user_id
-    (card1+addr1 proxy).
-  - A CAUSAL feature pipeline (velocity, time gaps, amount z-score, first-seen
-    flags) where every feature uses only the current and EARLIER rows (e.g.
-    amount z-score = expanding().mean().shift(1)) so nothing leaks the label.
-  - A sequence builder producing left-padded (N, 50, F) tensors + a padding mask,
-    and a TIME-BASED train/val/test split.
+Phase 1 - Data & features: a synthetic generator (runs with zero setup), an
+  IEEE-CIS adapter (maps the real Kaggle data to one canonical schema; rebuilds
+  the missing user_id and timestamp), a CAUSAL feature pipeline (no leakage), a
+  sequence builder ((N,50,F) left-padded + mask), and a TIME-BASED split.
 
-Phase 2 - Modeling: the RiskSequencer LSTM+attention, the LightGBM baseline, the
-  training loop (BCEWithLogitsLoss with pos_weight, AdamW, ReduceLROnPlateau,
-  early stopping on validation AUC), evaluation + threshold tuning, and a
-  hyperparameter search.
+Phase 2 - Modeling: the LSTM+attention, the LightGBM baseline, the HYBRID
+  stacking ensemble, the training loop (BCEWithLogitsLoss + pos_weight, AdamW,
+  ReduceLROnPlateau, early stopping on val AUC), evaluation + threshold tuning,
+  and a hyperparameter search.
 
-Phase 3 - Explainability & evaluation: attention-weight visualization notebook,
-  SHAP for LightGBM, ERROR ANALYSIS (false-negative vs false-positive profiling),
-  and a BUSINESS-METRICS module ($ caught / FP cost / net savings + profit curve).
+Phase 3 - Explainability & evaluation: attention visualization, SHAP for
+  LightGBM, error analysis (false-negative vs false-positive profiling), and a
+  business-metrics module ($ caught / FP cost / net savings + profit curve).
 
 Phase 4 - Deployment: SageMaker inference handlers (model_fn/input_fn/predict_fn/
   output_fn) with train/serve scaler parity, an MLflow promotion gate (no manual
-  override), and a packaging script that bundles model + scaler + threshold +
-  code into a deployable model.tar.gz.
+  override), a packaging script (model.tar.gz), AND a real deploy+benchmark
+  script that stood up a live endpoint, measured p99, and tore it down.
 
-Phase 5 - Monitoring & retraining: PSI drift detection on the three monitored
-  features, Slack alerting, an Airflow retrain DAG, and a LOCAL, testable retrain
-  orchestration (drift -> retrain -> evaluate -> promotion decision -> package)
-  with a champion/challenger gate.
+Phase 5 - Monitoring & retraining: Evidently AI drift (PSI, threshold 0.20),
+  Slack alerting, a runnable Airflow DAG (@weekly, drift-triggered, runs the full
+  loop end-to-end), and a champion/challenger + AUC-gate promotion decision.
 
 --------------------------------------------------------------------------------
-6. PROBLEMS WE FACED AND HOW WE SOLVED THEM (THE GOOD STORIES)
+8. PROBLEMS WE FACED AND HOW WE SOLVED THEM (THE GOOD STORIES)
 --------------------------------------------------------------------------------
 
-6.1 THE REAL-DATA REALITY CHECK (the big one)
-  Synthetic data gave ~0.99 AUC; real IEEE-CIS gave 0.81. Rather than panic-tune
-  the model, we DIAGNOSED: a quick LightGBM on the native features hit 0.888,
+8.1 THE REAL-DATA REALITY CHECK (the big one)
+  Synthetic data gave ~0.99 AUC; real IEEE-CIS gave 0.81 for the LSTM. Instead of
+  panic-tuning, we DIAGNOSED: a quick LightGBM on native features hit 0.888,
   proving the gap was features/data framing, not the model. That led to the
-  hybrid (0.81 -> 0.922), then feature enrichment (identity + categoricals ->
-  0.929). Lesson: when a model underperforms, isolate WHERE the signal is before
-  changing the model.
+  hybrid (0.81 -> 0.92), then feature enrichment with the identity table +
+  categoricals (-> 0.929). Lesson: isolate WHERE the signal is before changing
+  the model.
 
-6.2 THE 0.94 TARGET vs DATASET REALITY
+8.2 THE 0.94 TARGET vs DATASET REALITY
   The 0.94 target assumed a sequence-friendly dataset. IEEE-CIS is
-  per-transaction; the card1+addr1 proxy yields a median of 2 transactions per
-  user. We made the honest call to hold at 0.929 rather than chase the last point
-  with leaky, dataset-specific Kaggle feature engineering. Lesson: know when a
-  benchmark number stops being worth the engineering.
+  per-transaction; the user proxy gives a median of 2 transactions per user. We
+  made the honest call to hold at 0.929 rather than chase the last point with
+  leaky, dataset-specific feature engineering. Knowing when a number stops being
+  worth the effort is a real skill.
 
-6.3 THE OPENMP SEGFAULT (a genuinely nasty bug)
-  Training PyTorch and LightGBM IN THE SAME PROCESS segfaulted on macOS, because
-  both libraries bundle their own OpenMP runtime and the two conflict. It was
-  invisible because no single test loaded both libraries together. Fix: set
-  OMP_NUM_THREADS=1 and KMP_DUPLICATE_LIB_OK=TRUE BEFORE importing either library,
-  single-thread both, and lock it in with a SUBPROCESS regression test (so a crash
-  can't take down the whole test suite). The hybrid trainer needs both in one
-  process, so this guard is load-bearing.
+8.3 THE OPENMP SEGFAULT (a nasty hidden bug)
+  Training PyTorch and LightGBM in the SAME process segfaulted on macOS - both
+  bundle their own OpenMP runtime and they conflict. It was invisible because no
+  single test loaded both. Fix: set OMP_NUM_THREADS=1 and KMP_DUPLICATE_LIB_OK=
+  TRUE before importing either library, single-thread both, and lock it in with a
+  SUBPROCESS regression test so a crash can't kill the whole suite. The hybrid
+  trainer needs both libs, so this guard is load-bearing.
 
-6.4 THE PANDAS 3.0 DTYPE TRAP
+8.4 THE PANDAS 3.0 DTYPE TRAP
   Our categorical detection used `dtype == object`, but pandas 3.0 reads strings
   as the new `str` dtype, so ZERO categoricals were detected and the identity
-  features were silently ignored. Fix: detect categoricals by "not numeric"
-  instead of "== object." Lesson: silent correctness bugs (no error, just worse
-  results) are the dangerous ones — sanity-check feature counts.
+  features were silently ignored. Fix: detect categoricals by "not numeric." The
+  dangerous bugs are the silent ones - no error, just worse results.
 
-6.5 DATA LEAKAGE — AVOIDED BY DESIGN
-  Three places we could have leaked and didn't: (a) features are causal
-  (expanding+shift, first-seen flags); (b) the split is TIME-BASED, never random;
-  (c) the stacking meta-learner is fit on the VALIDATION predictions, not the
-  training predictions. Random splits or in-sample stacking would have inflated
-  AUC and lied to us.
+8.5 THE SAGEMAKER SDK + GEVENT INSTALL ISSUES
+  The SageMaker SDK v3 is a rewrite that moved modules and broke the classic
+  PyTorchModel deploy path, so we pinned to v2.x. And `gevent` (a transitive dep)
+  wouldn't build from source, so we installed it from a prebuilt wheel. Lesson:
+  pin to the API you actually wrote against; don't fight source builds when a
+  wheel exists.
 
-6.6 THRESHOLD DEGENERACY
-  "Maximize precision subject to FPR <= 5%" can collapse to a threshold that
-  flags almost nothing (precision 1.0, recall ~0). We surfaced this and built a
-  PROFIT CURVE (net savings vs threshold) so the operating point is chosen on
-  business value, not a degenerate corner.
+8.6 MEASURING p99 LATENCY HONESTLY
+  Measuring from a laptop gives ~200ms round-trip - but that's mostly NETWORK to
+  us-east-1, not inference. The honest "inference latency" is SageMaker's
+  CloudWatch ModelLatency metric, which excludes client/network time. That came
+  out p99 = 45ms (< 50ms). Always measure the right thing.
 
-6.7 THE ENGINEERING/GIT WORKFLOW HICCUPS
-  Real-world friction we worked through: an empty GitHub repo with no base branch
-  (so no PR was possible until we bootstrapped main); a read-only access token
-  (push 403s despite admin role on the repo); branch protection requiring a review
-  that a solo dev can't self-approve (solved with admin-merge, then by dropping
-  required reviews to 0 while keeping the CI gate and no-direct-push rule). Lesson:
-  branch protection + required status checks are the cheap insurance that keeps
-  main green.
+8.7 DATA LEAKAGE - AVOIDED BY DESIGN
+  Three places we could have leaked and didn't: (a) causal features (expanding+
+  shift, first-seen flags); (b) a TIME-BASED split, never random; (c) the
+  stacking meta-learner fit on VALIDATION predictions, not training predictions.
+
+8.8 RESUME-HONESTY PASS
+  We deliberately verified each claim against reality: validated the hybrid on
+  real data (0.93), wired Evidently for real (not just hand-rolled PSI), made the
+  Airflow DAG actually run end-to-end, and deployed a real SageMaker endpoint to
+  measure p99 (45ms). The bullets are backed by evidence, not aspiration.
 
 --------------------------------------------------------------------------------
-7. RESULTS (REAL IEEE-CIS, HELD-OUT TEST, USER-LEVEL AUC)
+9. RESULTS
 --------------------------------------------------------------------------------
-  LSTM + attention alone .................. 0.812
-  LightGBM alone (native+identity+cats) ... 0.926
-  HYBRID (stacked meta-learner) ........... 0.929   <-- shipped
-  (Synthetic generator, LSTM alone ........ ~0.99, because fraud is separable.)
+  Real IEEE-CIS, held-out test, user-level AUC:
+     LSTM + attention alone ............ 0.812
+     LightGBM alone (native+identity+cat) 0.926
+     HYBRID (stacked) .................. 0.929   <-- shipped
+  Synthetic generator, LSTM alone ...... ~0.99 (fraud deliberately separable)
+
+  SageMaker real-time endpoint (ml.c5.large), CloudWatch ModelLatency:
+     p50 8.2ms / p95 16.5ms / p99 45.14ms  ->  PASS (< 50ms target)
+     (then torn down - nothing left billing)
 
   Hard constants enforced in code: sequence length = 50, pos_weight for
-  imbalance, PSI = 0.20 on exactly {txn_velocity_1h, amount_zscore,
-  new_device_flag}, MLflow AUC gate = 0.90 with no manual override, time-based
-  splits, champion/challenger before promotion.
+  imbalance, PSI = 0.20 on {txn_velocity_1h, amount_zscore, new_device_flag},
+  MLflow AUC gate = 0.90 (no manual override), time-based splits,
+  champion/challenger before promotion.
 
 --------------------------------------------------------------------------------
-8. KEY DESIGN DECISIONS (QUICK REFERENCE)
+10. KEY DESIGN DECISIONS (QUICK REFERENCE)
 --------------------------------------------------------------------------------
-  - Output LOGITS, not sigmoid, from the model -> use BCEWithLogitsLoss for
-    numerical stability; apply sigmoid only at inference.
+  - Output LOGITS, not sigmoid -> BCEWithLogitsLoss for numerical stability;
+    apply sigmoid only at inference.
   - pos_weight in the loss for imbalance instead of blindly oversampling (SMOTE).
-  - Left-pad (not right-pad) short histories + mask -> the most RECENT
-    transaction is always at the same position, and attention ignores padding.
-  - Aggregate LightGBM per-transaction scores to the user with MAX (matches the
-    "fraud anywhere in the window" label).
-  - Fit the stacker on validation, evaluate on test (proper stacking).
-  - RobustScaler fit on TRAIN only, reused at val/test/serve (parity, no leakage).
+  - Left-pad short histories + mask -> the most recent transaction is always at
+    the same position, and attention ignores padding.
+  - Aggregate LightGBM per-transaction scores to the user with MAX.
+  - Fit the stacker on validation, evaluate on test (leak-free stacking).
+  - Scaler fit on TRAIN only, reused at val/test/serve (parity, no leakage).
+  - Evidently AI primary + hand-rolled PSI fallback (testable without the dep).
+  - Always-teardown deployment script (finally block) so nothing lingers billing.
 
 ================================================================================
-9. INTERVIEW QUESTIONS (with answers)
+11. INTERVIEW QUESTIONS (with answers)
 ================================================================================
 
 Q1. Why a sequence model instead of classifying each transaction independently?
-  Because the fraud signal lives in the ORDER and TIMING of events. Account
-  takeover is built from individually-plausible steps (login from new device,
-  address change, then a burst). A per-transaction classifier sees each step in
-  isolation and misses the pattern. An LSTM carries state across the sequence and
-  can represent "event B is suspicious GIVEN event A happened recently."
+  The fraud signal lives in the ORDER and TIMING of events. Account takeover is
+  built from individually-plausible steps. A per-transaction classifier sees each
+  step in isolation and misses the pattern. An LSTM carries state across the
+  sequence and represents "event B is suspicious GIVEN event A happened recently."
 
-Q2. Walk me through the attention mechanism and why it's required here.
-  We score each LSTM hidden state with a linear layer (additive attention),
-  mask out padded timesteps (set their score to -1e9 so softmax -> ~0), softmax
-  over real timesteps to get weights, and take the weighted sum of hidden states
-  as the context vector for the classifier. It's required because explainability
-  is a hard requirement: the weights tell an analyst WHICH past transactions drove
-  the flag. Without it the model is an opaque score.
+Q2. Walk me through the attention mechanism and why it's required.
+  Score each LSTM hidden state with a linear layer, mask padded timesteps
+  (set their score very negative so softmax ~0), softmax over real timesteps,
+  weighted-sum the hidden states into a context vector for the classifier. It's
+  required because explainability is mandatory: the weights say WHICH past
+  transactions drove the flag.
 
 Q3. How do you prevent data leakage in a fraud time series?
-  Three layers. (1) Causal features: every feature uses only current and earlier
-  rows — e.g. amount z-score is expanding().mean().shift(1), "new device" is a
-  first-seen flag via duplicated(). (2) Time-based split: train on the earliest
-  window, validate/test on later windows; never a random split, which would let
-  the model "see the future." (3) Stacking meta-learner fit on the validation
-  split, not the training split, so it never learns from rows the base models
-  were trained on. We also fit the scaler on train only.
+  Causal features (amount z-score = expanding().mean().shift(1); "new device" =
+  first-seen flag); a TIME-BASED split (train on earliest window, test on later);
+  and the stacking meta-learner fit on the validation split, not the training
+  split. Scaler fit on train only.
 
-Q4. Class imbalance is ~3% fraud. Why pos_weight instead of SMOTE/oversampling?
+Q4. Class imbalance is ~3% fraud. Why pos_weight instead of SMOTE?
   pos_weight (neg/pos) in BCEWithLogitsLoss reweights the loss so positives count
-  more, WITHOUT fabricating synthetic minority examples. SMOTE interpolates new
-  fraud points in feature space, which for sequential/behavioral data can create
-  unrealistic samples and leak structure; it's also awkward with sequences. The
-  plan made pos_weight the default and required justification before oversampling.
+  more without fabricating synthetic minority points. SMOTE interpolates fake
+  fraud in feature space, which is unrealistic for behavioral/sequential data and
+  awkward with sequences.
 
-Q5. Why does the LSTM hit 0.99 on synthetic but only 0.81 on real data?
-  Two reasons. The synthetic generator injects fraud as a clean, separable
-  behavioral burst, so it's almost trivially detectable. Real IEEE-CIS fraud is
-  subtle AND our adapter only used ~9 of 394 columns — we discarded the C/D/V
-  engineered features that carry most of the signal. Plus IEEE-CIS is
-  per-transaction with a weak user proxy (median 2 txns/user), so the sequence
-  model has little structure to exploit. It's a features/data-framing gap, not a
-  model-capacity gap — which we proved by training a quick LightGBM that beat the
-  LSTM by 7+ AUC points.
+Q5. Why 0.99 on synthetic but 0.81 (LSTM) on real data?
+  Synthetic fraud is a clean, separable burst. Real fraud is subtle, and our
+  adapter used ~9 of 394 columns, dropping the engineered features that carry the
+  signal; plus the user proxy gives ~2 txns/user, starving the LSTM. We proved it
+  was features/framing by training a quick LightGBM that beat the LSTM by 7+ AUC.
 
-Q6. Why combine LightGBM and the LSTM instead of picking one? Why stacking?
-  They capture complementary signal: LightGBM is the strongest tool for the rich
-  TABULAR features; the LSTM adds the sequential signal LightGBM can't see. We
-  combine with a stacking meta-learner (logistic regression over the two models'
-  scores) rather than a fixed average so the WEIGHTS ARE LEARNED from data. We fit
-  the meta-learner on the validation split to avoid leakage. The hybrid beat
-  LightGBM alone, confirming the LSTM contributes real, non-redundant signal.
+Q6. Why combine LightGBM and the LSTM? Why stacking?
+  They capture complementary signal: LightGBM is best for rich tabular features;
+  the LSTM adds the sequence signal LightGBM can't see. We stack with a logistic
+  meta-learner so the weighting is LEARNED, fit on validation to avoid leakage.
+  The hybrid beat LightGBM alone, so the LSTM adds non-redundant signal.
 
 Q7. How do you align a per-transaction LightGBM with a per-user LSTM for stacking?
-  The prediction unit is the user/sequence (the label is "fraud anywhere in the
-  user's last-50 window"). LightGBM scores each transaction; we aggregate those
-  to one score per user with MAX (a user is risky if any transaction is). The LSTM
-  already outputs one score per user. We align both onto the LSTM's user ordering,
-  filling any missing LightGBM user with the median, then stack.
+  The unit is the user (label = fraud anywhere in their window). LightGBM scores
+  each transaction; we aggregate to one score per user with MAX. The LSTM already
+  outputs one score per user. Align both on the user set, then stack.
 
-Q8. AUC-ROC is your headline metric. Is it the right one for 3% fraud? What else?
-  AUC-ROC is threshold-independent and good for ranking, but it can look optimistic
-  under heavy imbalance because the negative class dominates the FPR axis. So we
-  also track AVERAGE PRECISION (area under precision-recall), PRECISION AT A FIXED
-  LOW FPR (e.g. <= 5%), and dollar metrics (net savings). For deployment the
-  operating threshold matters more than AUC, so we tune it explicitly.
+Q8. AUC-ROC is your headline metric. Right choice for 3% fraud? What else?
+  AUC is threshold-independent and good for ranking but can look optimistic under
+  heavy imbalance. So we also track average precision (PR-AUC), precision at a
+  fixed low FPR, and dollar metrics. For deployment the operating threshold
+  matters more than AUC, so we tune it explicitly.
 
-Q9. Your threshold tuning produced precision 1.0 but recall ~0. What happened, fix?
+Q9. Your threshold tuning gave precision 1.0 but recall ~0. Why, and the fix?
   "Maximize precision subject to FPR <= 5%" can collapse to an extreme threshold
-  that flags only the single most-confident case (precision 1.0, recall ~0). It's
-  a degenerate corner of the constraint. We surfaced it and added a profit curve
-  (net savings vs threshold) so we pick the operating point on business value, and
-  we'd cap minimum recall or optimize expected cost directly in production.
+  flagging almost nothing. We surfaced it and added a profit curve (net savings vs
+  threshold) so we choose the operating point on business value; in production
+  we'd cap minimum recall or optimize expected cost directly.
 
-Q10. Explain the OpenMP segfault and your fix.
-  PyTorch and LightGBM each bundle their own OpenMP (libomp) runtime. Loading both
-  into one process on macOS causes two OpenMP runtimes to coexist, which
-  deadlocks/segfaults. It was hidden because no single test imported both. The
-  hybrid trainer needs both, so we set OMP_NUM_THREADS=1 and
-  KMP_DUPLICATE_LIB_OK=TRUE BEFORE importing either library, single-thread both,
-  and added a subprocess regression test (isolated so a crash can't fail the whole
-  suite). Import order alone didn't fix it; constraining threads + the env flag did.
+Q10. Explain the torch + LightGBM segfault and your fix.
+  Both bundle their own OpenMP runtime; loading both in one process on macOS
+  conflicts and segfaults. It was hidden because no single test imported both. Fix:
+  OMP_NUM_THREADS=1 + KMP_DUPLICATE_LIB_OK=TRUE before importing, single-thread
+  both, and a subprocess regression test so a crash can't fail the whole suite.
 
-Q11. Why output logits and use BCEWithLogitsLoss instead of a Sigmoid + BCELoss?
-  BCEWithLogitsLoss fuses the sigmoid and the loss in a numerically stable way
-  (log-sum-exp trick), avoiding overflow/underflow and vanishing gradients at
-  saturated probabilities, and it's where pos_weight is applied cleanly. So the
-  model emits raw logits during training and we apply sigmoid only at inference
-  (predict_proba). The reference architecture had a trailing Sigmoid; we
-  deliberately removed it for this reason.
+Q11. Why logits + BCEWithLogitsLoss instead of Sigmoid + BCELoss?
+  BCEWithLogitsLoss fuses sigmoid and loss in a numerically stable way (log-sum-
+  exp), avoids overflow/vanishing gradients at saturated probabilities, and is
+  where pos_weight is applied cleanly. The model emits logits; we apply sigmoid
+  only at inference.
 
-Q12. How does drift monitoring trigger retraining? Why PSI and why those features?
-  We compute Population Stability Index (PSI) between a reference window and the
-  recent window for three behavioral features (txn_velocity_1h, amount_zscore,
-  new_device_flag). PSI bins the reference distribution and measures how much the
-  current distribution has shifted; PSI > 0.20 on any monitored feature triggers
-  retraining and a Slack alert. We chose those three because they're the
-  highest-signal behavioral features and directly reflect the takeover pattern;
-  monitoring a focused set keeps the signal clean and the alert noise low.
+Q12. What is Evidently AI and how does it trigger retraining?
+  Evidently is an ML monitoring library that compares a reference dataset to
+  current data and reports drift. We run its DataDriftPreset with the PSI test on
+  3 behavioral features; if any feature's PSI exceeds 0.20 we trigger retraining
+  and a Slack alert. We keep a hand-rolled PSI as a dependency-free fallback so
+  the logic is testable without Evidently installed.
 
-Q13. What is champion/challenger and how does promotion work?
-  The current production model is the "champion." A newly trained "challenger"
-  must pass TWO gates before promotion: (1) an absolute MLflow AUC gate (>= 0.90,
-  no manual override), and (2) it must BEAT the champion's AUC (optionally by a
-  margin). In production it also gets shadow/A-B traffic (e.g. 10%) before full
-  promotion. We implemented decide_promotion() combining both rules and share it
-  between the local pipeline and the Airflow DAG so they can't disagree.
+Q13. What is PSI and how is it computed?
+  Population Stability Index - how much a feature's distribution shifted vs a
+  baseline. Bin the reference values; for each bin take reference% and current%;
+  PSI = sum((cur% - ref%) * ln(cur% / ref%)). < 0.1 stable, 0.1-0.2 moderate,
+  > 0.2 significant. We trigger at 0.20.
 
-Q14. Why left-pad sequences and mask, rather than right-pad?
-  Left-padding puts the MOST RECENT transaction at the last position for every
+Q14. What is champion/challenger and how does promotion work?
+  The production model is the champion. A newly trained challenger must pass TWO
+  gates: an absolute AUC gate (>= 0.90, no manual override) AND beat the champion's
+  AUC. In production it also gets shadow/A-B traffic before full promotion. One
+  decide_promotion() function enforces both and is shared by the local pipeline
+  and the Airflow DAG so they can't disagree.
+
+Q15. Why left-pad and mask, not right-pad?
+  Left-padding puts the most recent transaction at the last position for every
   user, so "position" has consistent temporal meaning regardless of history
-  length, which helps the model and the attention readout. The padding mask
-  ensures the LSTM/attention ignore the zero rows so short histories aren't
-  polluted by fake "transactions." (For the LSTM we also avoid letting padding
-  contribute to the attention-weighted context.)
+  length. The mask makes the LSTM/attention ignore the zero rows so short
+  histories aren't polluted by fake transactions.
 
-Q15. How would you deploy this and hit p99 < 50ms? What are the risks?
-  Package model + scaler + threshold + inference code into model.tar.gz, deploy as
-  a SageMaker real-time endpoint with the four handlers (model_fn/input_fn/
-  predict_fn/output_fn). Benchmark p50/p95/p99 under load; if p99 > 50ms, reduce
-  sequence length, shrink hidden size, TorchScript/compile the model, or move to a
-  compute-optimized instance. Keep train/serve parity by shipping the SAME fitted
-  scaler. Risks: feature computation latency (velocity windows) can dominate, so
-  precompute/caching matters; cold starts; and the hybrid adds a second model +
-  meta-learner to the critical path, which you'd co-locate or precompute.
+Q16. How did you deploy and verify p99 < 50ms? What's the subtlety?
+  Packaged model + scaler + threshold + inference code into model.tar.gz, uploaded
+  to S3, deployed a SageMaker PyTorch real-time endpoint, and load-tested it. The
+  subtlety: measuring from a laptop includes ~200ms of NETWORK round-trip to
+  us-east-1. The honest inference latency is CloudWatch ModelLatency (excludes
+  network), which was p99 = 45ms. Then I tore the endpoint down so nothing bills.
 
-Q16. The card1+addr1 user_id is a proxy. What are the dangers and alternatives?
+Q17. The card1+addr1 user id is a proxy. Dangers and alternatives?
   It's imperfect: collisions (a popular card1 with missing addr1 collapses many
-  real users into one mega-"user" with thousands of transactions), and most real
-  users get only 1-2 transactions, starving the sequence model. Dangers: label
-  contamination on collision buckets and weak sequence signal. Alternatives used
-  in IEEE-CIS solutions: a stronger uid (card + addr + a D1-derived registration
-  day), or accept that the dataset is per-transaction and lean on the tabular
-  model. In production you'd use a real account/customer id and the sequence model
-  would be far stronger.
+  users into one mega-user with thousands of transactions) and short histories
+  (~2 txns/user), which starves the sequence model. Alternatives: a stronger uid
+  (card + addr + a registration-day-derived key), or accept the dataset is
+  per-transaction and lean on the tabular model. In production you'd use a real
+  account id and the sequence model would be much stronger.
 
-Q17. (Stretch) How would you push from 0.929 toward the 0.94 target responsibly?
-  The remaining levers are uid-aggregation features (per-user TransactionAmt
-  mean/std/count, inter-arrival stats) and D-feature day-normalization — the
-  highest-impact IEEE-CIS techniques. The catch: done as GLOBAL aggregations they
-  LEAK; done correctly you compute stats on the train split only and map them
-  forward, with a cold-start fallback for unseen users. We made the deliberate
-  call that 0.929 is strong and the last point wasn't worth dataset-specific,
-  leak-prone engineering — a real-world tradeoff judgment, not just a number chase.
+Q18. Walk me through the automated retraining loop end to end.
+  Airflow runs weekly. check_drift uses Evidently PSI; if no feature breaches 0.20
+  the run short-circuits (no retrain). If drift is detected, retrain on fresh data,
+  then the promotion gate checks AUC >= 0.90 AND beats champion; if it passes, the
+  model is packaged for deployment, else the old model stays. Slack alerts fire at
+  drift, completion, and failure; MLflow logs every run; each task has 3 retries.
+  I demonstrated the whole loop running end-to-end with no manual steps.
+
+Q19. (Stretch) How would you push 0.929 toward 0.94 responsibly?
+  Add uid-aggregation features (per-user amount mean/std/count, inter-arrival
+  stats) and D-feature day-normalization - the highest-impact IEEE-CIS techniques.
+  The catch: as GLOBAL aggregations they LEAK; done correctly you compute stats on
+  the train split only and map them forward with a cold-start fallback. I judged
+  0.929 strong enough that the last point wasn't worth leak-prone, dataset-
+  specific engineering - a real tradeoff call, not a number chase.
 
 ================================================================================
 END
