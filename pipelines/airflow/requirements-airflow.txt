@@ -7,3 +7,5 @@ pandas>=2.0
 numpy>=1.24
 pyarrow>=14.0
 evidently>=0.7
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9

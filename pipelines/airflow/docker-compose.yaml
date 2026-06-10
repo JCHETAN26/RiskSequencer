@@ -1,29 +1,49 @@
-# Local Airflow for the RiskSequencer weekly retrain DAG.
-# Single-node `airflow standalone` (SQLite + LocalExecutor) — enough to run and
-# schedule the DAG. For production use the official multi-service compose with
-# Postgres + CeleryExecutor.
+# Airflow (on PostgreSQL) for the RiskSequencer weekly retrain DAG.
+#
+# One Postgres instance backs BOTH Airflow's metadata DB (dag runs, task logs)
+# AND the project's inference log (storage/db.py), so the scheduled DAG reads
+# drift straight from the same database it logs predictions to.
 #
 # Run from the repo root:
 #   docker compose -f pipelines/airflow/docker-compose.yaml up --build
 # Then open http://localhost:8080 (admin password printed in the logs).
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: risk
+      POSTGRES_PASSWORD: risk
+      POSTGRES_DB: risksequencer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U risk -d risksequencer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   airflow:
     build:
       context: ../..
       dockerfile: pipelines/airflow/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: standalone
     environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://risk:risk@postgres:5432/risksequencer
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/project/pipelines
       AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
       PYTHONPATH: /opt/project
-      # Optional: real Slack alerts on drift / promotion / failure.
+      # The DAG reads drift from this same Postgres (inference log).
+      DATABASE_URL: postgresql+psycopg2://risk:risk@postgres:5432/risksequencer
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     volumes:
-      - ../..:/opt/project          # mount the whole repo so the DAG imports project modules
-      - airflow_db:/opt/airflow
+      - ../..:/opt/project
     ports:
       - "8080:8080"
 
 volumes:
-  airflow_db:
+  pgdata:

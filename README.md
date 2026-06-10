@@ -90,6 +90,9 @@ MLOps LOOP  (keeping the model fresh)
         └────────── Slack alerts · MLflow logs every run ──────────┘
 ```
 
+**See [`docs/WORKFLOW.md`](docs/WORKFLOW.md)** for rendered diagrams of both loops
+(inference + monitoring/retrain) and a runnable Postgres demo.
+
 ## How it works (plain English)
 
 - **Scoring:** pull a user's last 50 transactions → turn them into features → the
@@ -155,8 +158,12 @@ serving/deploy_sagemaker.py   deploy endpoint, benchmark p99 (CloudWatch), auto-
 monitoring/evidently_report.py  Evidently AI drift (PSI) + dependency-free fallback
 monitoring/slack_alerts.py      webhook alerts
 pipelines/retrain.py            end-to-end retrain + promotion (gate + champion/challenger)
-pipelines/retrain_dag.py        Airflow DAG (runs the loop end-to-end)
-pipelines/airflow/              Dockerized Airflow (compose + Dockerfile + runbook)
+pipelines/retrain_dag.py        Airflow DAG (reads drift from Postgres; runs end-to-end)
+pipelines/airflow/              Dockerized Airflow on PostgreSQL (compose + Dockerfile + runbook)
+
+storage/db.py                   PostgreSQL store: transactions + inference log (drift source)
+storage/seed_demo.py            live demo: log predictions -> read drift from Postgres
+storage/docker-compose.yaml     PostgreSQL for the inference/feature log
 
 notebooks/01_eda.ipynb          imbalance, velocity, amount, mutual information
 notebooks/02_modeling.ipynb     LightGBM vs LSTM comparison (+ SHAP, ROC/PR)
@@ -184,7 +191,7 @@ subprocess so a crash can't take down the whole suite.
 | 2 — Modeling | ✅ LSTM+attention, LightGBM, **hybrid** (0.93 on real data), HPO |
 | 3 — Explainability | ✅ attention viz, SHAP, error analysis, business metrics |
 | 4 — Deployment | ✅ handlers + packaging + MLflow gate; **endpoint deployed & p99 45 ms verified** |
-| 5 — Monitoring & retrain | ✅ Evidently AI (PSI), Slack, champion/challenger, **Airflow DAG runs end-to-end** |
+| 5 — Monitoring & retrain | ✅ Evidently AI (PSI), Slack, champion/challenger, **Airflow DAG runs end-to-end**, **PostgreSQL inference-log → drift source** |
 
 **Honest scope note:** the SageMaker endpoint was deployed and benchmarked *once*
 to verify p99, then torn down (it is not a standing production service). The
